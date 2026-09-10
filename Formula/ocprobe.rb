@@ -42,5 +42,6 @@ class Ocprobe < Formula
   test do
     assert_match "ocprobe #{version}", shell_output("#{bin}/ocprobe version")
     assert_match "audit", shell_output("#{bin}/ocprobe help")
+    assert_path_exists share/"ocprobe/validate-skip-patterns.txt"
   end
 end
