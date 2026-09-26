@@ -1,10 +1,10 @@
 class Ocprobe < Formula
   desc "OpenCode Model Probe - Enterprise-grade model catalog lifecycle management"
   homepage "https://github.com/SunnyJayaRaju/oc-model-manager"
-  url "https://github.com/SunnyJayaRaju/oc-model-manager/releases/download/v3.1.1/ocprobe-3.1.1.tar.gz"
-  sha256 "f28dfc15172164b733db3d73cda66d708101c6714fa3cc679a89c3fc43758998"
+  url "https://github.com/SunnyJayaRaju/oc-model-manager/releases/download/v3.1.2/ocprobe-3.1.2.tar.gz"
+  sha256 "087bdcacd1e3ce5cb550c5c493875abdeb2bc7c541100df012c93fb54eb17fdb"
   license "MIT"
-  version "3.1.1"
+  version "3.1.2"
 
   depends_on "bash"
   depends_on "jq"
