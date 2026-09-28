@@ -15,7 +15,7 @@ permissions:
 jobs:
   style:
     name: brew style
-    runs-on: ubuntu-latest
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v7
       - name: Run brew style
@@ -23,7 +23,7 @@ jobs:
 
   audit:
     name: brew audit --strict --online
-    runs-on: ubuntu-latest
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v7
       - name: Run brew audit

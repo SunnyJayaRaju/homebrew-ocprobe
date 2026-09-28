@@ -19,7 +19,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, ubuntu-latest]
+        # macos only: Homebrew is not installed on GitHub's ubuntu runners, so
+        # a linux leg fails on `brew: command not found` rather than on anything
+        # about the formula.
+        os: [macos-latest]
     steps:
       - uses: actions/checkout@v7
       - name: brew style
