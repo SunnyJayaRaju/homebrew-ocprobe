@@ -127,14 +127,16 @@ jobs:
           # The path the build step pinned, not a re-derivation of it.
           TARBALL="$RUNNER_TEMP/pkgcheck/ocprobe-$VERSION.tar.gz"
           SHA="$(shasum -a 256 "$TARBALL" | cut -d' ' -f1)"
-          # brew tap wants a git repository, not a directory. The previous run
-          # failed here with
+          # brew tap wants a git repository, not a directory. The run before
+          # this one failed with
           #     fatal: repository '.../ocprobetesttap' does not exist
-          # because the directory had no .git in it.
+          # and the one before that had the same shape but got further, so the
+          # whole thing is assembled in a temp dir and committed ONCE, at the end
+          # -- committing before the formula is written commits an empty tree
+          # (git refuses, under set -e) and the step dies on the message.
           TAPDIR="$RUNNER_TEMP/ocprobetesttap"
           rm -rf "$TAPDIR" 2>/dev/null || true
           mkdir -p "$TAPDIR/Formula"
-          git -C "$TAPDIR" init --quiet
 
           # The formula comes from the tap repo, at the requested ref.
           if ! git clone --quiet --depth 1 --branch "$TAP_REF" "$TAP_REPO" "$RUNNER_TEMP/tapsrc"; then
@@ -160,10 +162,17 @@ jobs:
           echo "  temp formula:"
           grep -E '^  (url|sha256) ' "$TAPDIR/Formula/ocprobe.rb" | sed 's/^/  /'
 
-          # Commit it, so `brew tap <path>` has something to clone. The identity
-          # is irrelevant and local to this throwaway repo.
+          # One commit, with the formula already in place. The identity is
+          # irrelevant and local to this throwaway repo. The -C and -c ordering
+          # matters: `git -C <dir> -c k=v` applies the config to the repository
+          # at <dir>, and the commit must not be run from the tap's own
+          # checkout.
+          git -C "$TAPDIR" init --quiet
+          git -C "$TAPDIR" add -A
           git -C "$TAPDIR" -c user.email=ci@example.invalid -c user.name=ci \
             commit --quiet -m "temp tap"
+          git -C "$TAPDIR" log --oneline | sed 's/^/  /'
+          git -C "$TAPDIR" ls-files | sed 's/^/  /'
 
           echo "  the committed formula is untouched:"
           git diff --stat | sed 's/^/  /' || echo "    (clean)"
