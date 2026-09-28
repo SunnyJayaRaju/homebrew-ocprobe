@@ -43,13 +43,21 @@ jobs:
       fail-fast: false
       matrix:
         # macOS only. GitHub's ubuntu runners ship no Homebrew, and the install
-        # stanza is macOS-shaped (virtualenv_install_with_resources, a wrapper
-        # written into bin/), so a Linux result would not be evidence about what
+        # stanza is macOS-shaped (a python@3.12 venv and a bash wrapper written
+        # into bin/), so a Linux result would not be evidence about what
         # users actually install.
         os: [macos-latest]
     env:
       SOURCE_REPO: "https://github.com/SunnyJayaRaju/oc-model-manager.git"
       TAP_REPO: "https://github.com/SunnyJayaRaju/homebrew-ocprobe.git"
+      # Current Homebrew refuses to LOAD a formula from a tap that has not been
+      # trusted, and the build runs in a forked child whose exception is
+      # serialised over a pipe -- so an untrusted tap surfaces only as
+      #   Failure while executing; /usr/bin/sandbox-exec ... exited with 1
+      # with none of the real message. XDG_CONFIG_HOME is pointed at a scratch
+      # dir so trust.json lands on the throwaway runner and nowhere else, and it
+      # is set at job level because each step is a fresh shell.
+      XDG_CONFIG_HOME: ${{ runner.temp }}/homebrew-config
     steps:
       # This repo (the tap) -- used for its Formula/ocprobe.rb.
       - uses: actions/checkout@v7
@@ -153,8 +161,11 @@ jobs:
 
           path, tarball, sha = sys.argv[1], sys.argv[2], sys.argv[3]
           s = open(path).read()
-          s2 = re.sub(r'^  url ".*"$', '  url "file://%s"' % tarball, s, count=1, flags=re.M)
-          s2 = re.sub(r'^  sha256 ".*"$', '  sha256 "%s"' % sha, s2, count=1, flags=re.M)
+          # Match either quote style: `brew style` rewrites a formula to single
+          # quotes, so anchoring on double quotes made this rewrite a no-op on a
+          # style-cleaned formula.
+          s2 = re.sub(r'^  url (["\']).*\1$', '  url "file://%s"' % tarball, s, count=1, flags=re.M)
+          s2 = re.sub(r'^  sha256 (["\']).*\1$', '  sha256 "%s"' % sha, s2, count=1, flags=re.M)
           assert s2 != s, "url/sha256 were not rewritten"
           open(path, "w").write(s2)
           PY
@@ -181,7 +192,11 @@ jobs:
         run: |
           set -euo pipefail
           TAPDIR="$RUNNER_TEMP/ocprobetesttap"
+          mkdir -p "$XDG_CONFIG_HOME"
           brew tap homebrew/ocprobetest "$TAPDIR"
+          # A path-tapped tap is identified by its path, not by the
+          # sunnyjayaraju/ocprobe name, so trust has to follow the tap.
+          brew trust --tap homebrew/ocprobetest
           brew install --build-from-source homebrew/ocprobetest/ocprobe 2>&1 | tee install.log
           # The real exception matters: on a developer machine the sandbox
           # replaced it with a profile dump, which is why this job exists.
