@@ -28,7 +28,7 @@ jobs:
       - name: brew style
         run: brew style Formula/ocprobe.rb
       - name: brew audit --strict
-        run: brew audit --strict "$(basename "$GITHUB_REPOSITORY")/ocprobe"
+        run: brew audit --strict "SunnyJayaRaju/homebrew-ocprobe/ocprobe"
       # The install stanza and the test block are Ruby, so a syntax error in
       # either would only surface at install time on a user's machine. This
       # parses the formula without building it.

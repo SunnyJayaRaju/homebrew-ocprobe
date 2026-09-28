@@ -27,7 +27,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Run brew audit
-        # By name, not by path: this Homebrew refuses `brew audit <path>`.
-        # The tap is checked out as the repository itself, so the fully
-        # qualified name is the repository's own name + the formula.
-        run: brew audit --strict --online "$(basename "$GITHUB_REPOSITORY")/ocprobe"
+        # By fully-qualified name, not by path: this Homebrew refuses
+        # `brew audit <path>`, and a bare `basename $GITHUB_REPOSITORY`
+        # yields a name with no user, which brew reads as a core formula.
+        run: brew audit --strict --online "SunnyJayaRaju/homebrew-ocprobe/ocprobe"
