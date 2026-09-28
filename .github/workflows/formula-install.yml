@@ -91,12 +91,31 @@ jobs:
       - name: Build the release tarball
         # The same packaging path the build job uses, so what is tested is what
         # would be published.
+        #
+        # PKGCHECK_WORK is pinned rather than left to default. The script writes
+        # to $PKGCHECK_WORK (defaulting to $RUNNER_TEMP/pkgcheck), and the
+        # previous version of this step guessed at a `.pkgcheck/dist/` path that
+        # the script never creates -- so the run died in "Show the artifact" with
+        #   ls: .../oc-model-manager/.pkgcheck/dist/: No such file or directory
+        # Pinning it also means the later steps read the artifact from exactly
+        # where it was written, instead of re-deriving the location.
+        env:
+          PKGCHECK_WORK: ${{ runner.temp }}/pkgcheck
         run: bash "$RUNNER_TEMP/oc-model-manager/scripts/ci/package-check.sh" build
 
       - name: Show the artifact
+        env:
+          PKGCHECK_WORK: ${{ runner.temp }}/pkgcheck
         run: |
-          ls -la "$RUNNER_TEMP/oc-model-manager/.pkgcheck/dist/"
-          cat "$RUNNER_TEMP"/oc-model-manager/.pkgcheck/dist/*.sha256
+          set -euo pipefail
+          VERSION="$(tr -d '[:space:]' <"$RUNNER_TEMP/oc-model-manager/VERSION")"
+          ls -la "$PKGCHECK_WORK/dist/"
+          # There is no .sha256 here: scripts/ci/package-check.sh's `build` phase
+          # writes only the tarball (it verifies a downloaded checksum, it does
+          # not produce one). The formula step computes the hash itself, which is
+          # the value that matters -- it is what the real release CI publishes.
+          ls -la "$PKGCHECK_WORK/ocprobe-$VERSION.tar.gz"
+          shasum -a 256 "$PKGCHECK_WORK/ocprobe-$VERSION.tar.gz"
 
       - name: Make a temp tap with a file:// url
         env:
@@ -105,7 +124,8 @@ jobs:
           set -euo pipefail
           SRC="$RUNNER_TEMP/oc-model-manager"
           VERSION="$(tr -d '[:space:]' <"$SRC/VERSION")"
-          TARBALL="$SRC/.pkgcheck/dist/ocprobe-$VERSION.tar.gz"
+          # The path the build step pinned, not a re-derivation of it.
+          TARBALL="$RUNNER_TEMP/pkgcheck/ocprobe-$VERSION.tar.gz"
           SHA="$(shasum -a 256 "$TARBALL" | cut -d' ' -f1)"
           TAPDIR="$RUNNER_TEMP/ocprobetesttap"
           mkdir -p "$TAPDIR/Formula"
