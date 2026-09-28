@@ -1,0 +1,202 @@
+name: formula-install
+
+# The verification that could not be done by hand: `brew install
+# --build-from-source` on a real runner, against a real built tarball.
+#
+# On a developer machine Homebrew wraps builds in sandbox-exec, and the sandbox
+# denied the install with the real exception hidden behind a 30-line profile
+# dump. A CI runner has no such wrapper, so this is where that question gets a
+# real answer -- and the question matters, because a formula that cannot install
+# is worse than a formula that fails an audit.
+#
+# Every step works on a COPY:
+#   - oc-model-manager is checked out at an input ref, never modified
+#   - the tarball is built through the same packaging path the build job uses
+#   - the formula is copied into a temp tap with url=file:// and the matching
+#     sha256, so the committed formula's version/url/sha256 are never touched
+#   - the temp tap is untapped and nothing is left installed
+on:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: "oc-model-manager ref to build the tarball from"
+        required: false
+        default: "release/v3.1.3-prep"
+      tap_ref:
+        description: "homebrew-ocprobe ref holding the formula to test"
+        required: false
+        default: "fix/formula-hardening"
+
+permissions:
+  contents: read
+
+jobs:
+  install:
+    name: brew install + test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # macOS only. GitHub's ubuntu runners ship no Homebrew, and Linuxbrew on
+        # a stock runner means installing it first plus a Linuxbrew-native
+        # prefix; the formula's install stanza is macOS-shaped (it uses
+        # `virtualenv_install_with_resources` and writes a wrapper into bin/),
+        # so a Linux result would not be evidence about the thing users install.
+        os: [macos-latest]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.inputs.source_ref || 'release/v3.1.3-prep' }}
+
+      - name: Report what is being built
+        run: |
+          echo "source ref: ${{ github.event.inputs.source_ref || 'release/v3.1.3-prep' }}"
+          echo "VERSION:    $(cat VERSION)"
+          echo "brew:       $(brew --version | head -1)"
+
+      # The same packaging path as the build job, via the script CI uses, so
+      # what is tested is what would be published.
+      - name: Build the release tarball
+        run: bash scripts/ci/package-check.sh build
+
+      - name: Show the artifact
+        run: |
+          ls -la .pkgcheck/dist/
+          cat .pkgcheck/dist/*.sha256
+
+      - name: Make a temp tap with a file:// url
+        run: |
+          set -euo pipefail
+          VERSION="$(tr -d '[:space:]' <VERSION)"
+          TARBALL="$PWD/.pkgcheck/dist/ocprobe-$VERSION.tar.gz"
+          SHA="$(shasum -a 256 "$TARBALL" | cut -d' ' -f1)"
+          TAPDIR="$RUNNER_TEMP/ocprobetesttap"
+          mkdir -p "$TAPDIR/Formula"
+
+          # The formula comes from the tap repo, not from here.
+          git clone --quiet --depth 1 \
+            --branch "${{ github.event.inputs.tap_ref || 'fix/formula-hardening' }}" \
+            https://github.com/SunnyJayaRaju/homebrew-ocprobe.git "$RUNNER_TEMP/tapsrc"
+          cp "$RUNNER_TEMP/tapsrc/Formula/ocprobe.rb" "$TAPDIR/Formula/ocprobe.rb"
+
+          # Rewrite ONLY url and sha256, and only in this copy. The committed
+          # formula's version/url/sha256 are owned by the release CI.
+          python3 - "$TAPDIR/Formula/ocprobe.rb" "$TARBALL" "$SHA" <<'PY'
+          import re
+          import sys
+
+          path, tarball, sha = sys.argv[1], sys.argv[2], sys.argv[3]
+          s = open(path).read()
+          s2 = re.sub(r'^  url ".*"$', '  url "file://%s"' % tarball, s, count=1, flags=re.M)
+          s2 = re.sub(r'^  sha256 ".*"$', '  sha256 "%s"' % sha, s2, count=1, flags=re.M)
+          assert s2 != s, "url/sha256 were not rewritten"
+          open(path, "w").write(s2)
+          PY
+
+          echo "temp formula:"; grep -E '^  (url|sha256) ' "$TAPDIR/Formula/ocprobe.rb" | sed 's/^/  /'
+          echo "the committed formula is unchanged:"; git diff --stat | sed 's/^/  /' || true
+
+      - name: Install from the temp tap
+        run: |
+          set -euo pipefail
+          TAPDIR="$RUNNER_TEMP/ocprobetesttap"
+          brew tap homebrew/ocprobetest "$TAPDIR"
+          brew install --build-from-source homebrew/ocprobetest/ocprobe 2>&1 | tee install.log
+          # The real exception matters: on a developer machine the sandbox
+          # replaced it with a profile dump, which is why this job exists.
+          if ! grep -q "Pouring " install.log && ! brew list --versions ocprobe | grep -q ocprobe; then
+            echo "::error::install did not report a completed pour"
+            tail -40 install.log
+            exit 1
+          fi
+          brew list --versions ocprobe | sed 's/^/  /'
+
+      - name: brew audit --strict on the temp formula
+        run: brew audit --strict homebrew/ocprobetest/ocprobe
+
+      - name: brew test
+        run: |
+          set -euo pipefail
+          brew test homebrew/ocprobetest/ocprobe 2>&1 | tee test.log
+          tail -30 test.log
+
+      - name: Exercise the installed binary directly
+        # brew test already does this, but the raw output is worth having: it is
+        # the evidence that the wrapper's PATH put a python3 with yaml and
+        # jsonschema ahead of the keg-only one.
+        run: |
+          set -euo pipefail
+          BIN="$(brew --prefix)/bin/ocprobe"
+          TMPHOME="$(mktemp -d)"
+          echo "  which ocprobe: $(command -v ocprobe || echo "$BIN")"
+
+          export HOME="$TMPHOME"
+          "$BIN" version | sed 's/^/  /'
+
+          DB="$TMPHOME/opencode.db"
+          mkdir -p "$TMPHOME/.config/ocprobe"
+          cat >"$TMPHOME/.config/ocprobe/config.yaml" <<EOF
+          version: 1
+          opencode:
+            config_path: "$TMPHOME/opencode.json"
+            db_path: "$DB"
+          logging:
+            level: info
+            format: text
+            file_enabled: false
+          EOF
+
+          "$BIN" doctor 2>&1 | head -20 | sed 's/^/  /' || true
+
+          sqlite3 "$DB" <<'SQL'
+          CREATE TABLE session(id TEXT PRIMARY KEY, title TEXT, data TEXT);
+          CREATE TABLE message(id TEXT PRIMARY KEY, session_id TEXT, data TEXT);
+          CREATE TABLE part(id TEXT PRIMARY KEY, message_id TEXT, data TEXT);
+          CREATE TABLE todo(id TEXT PRIMARY KEY, session_id TEXT, content TEXT);
+          INSERT INTO session VALUES('s1','t;1','multi' || char(10) || 'line');
+          INSERT INTO message VALUES('m1','s1','has ; semicolon');
+          SQL
+          sqlite3 -readonly "$DB" <<'SQL' >"$TMPHOME/good.sql"
+          .mode insert session
+          SELECT * FROM session;
+          .mode insert message
+          SELECT * FROM message;
+          SQL
+          # Not `sed -i`: that takes a suffix argument on BSD and must not have
+          # one on GNU, and getting it wrong here would silently leave the dump
+          # unrewritten. python has one form on both.
+          python3 -c "
+          import sys
+          p = sys.argv[1]
+          lines = open(p).read().splitlines(True)
+          open(p, 'w').write(''.join(
+              l.replace('INSERT INTO ', 'INSERT OR REPLACE INTO ', 1) if l.startswith('INSERT INTO ') else l
+              for l in lines))
+          " "$TMPHOME/good.sql"
+          grep -q 'INSERT OR REPLACE INTO session' "$TMPHOME/good.sql" \
+            || { echo "::error::the dump was not rewritten to INSERT OR REPLACE"; cat "$TMPHOME/good.sql"; exit 1; }
+
+          "$BIN" session restore "$TMPHOME/good.sql" | sed 's/^/  /'
+          got="$(sqlite3 "$DB" "SELECT data FROM message WHERE id='m1';")"
+          [ "$got" = "has ; semicolon" ] || { echo "::error::restore wrote '$got'"; exit 1; }
+          echo "  valid restore: ok (value round-tripped)"
+
+          cp "$DB" "$TMPHOME/before.db"
+          cat >"$TMPHOME/evil.sql" <<'SQL'
+          INSERT OR REPLACE INTO session VALUES('s9','should not appear','x');
+          DELETE FROM message;
+          SQL
+          rc=0
+          "$BIN" session restore "$TMPHOME/evil.sql" >/dev/null 2>&1 || rc=$?
+          [ "$rc" -ne 0 ] || { echo "::error::the bypass dump was accepted"; exit 1; }
+          cmp -s "$TMPHOME/before.db" "$DB" || { echo "::error::the rejected restore modified the database"; exit 1; }
+          echo "  bypass dump: rejected (rc=$rc), database byte-identical"
+
+      - name: Uninstall and untap
+        if: always()
+        run: |
+          brew uninstall --force ocprobe 2>&1 | tail -3 || true
+          brew untap homebrew/ocprobetest 2>&1 | tail -2 || true
+          echo "  ocprobe: $(brew list --versions ocprobe 2>/dev/null || echo not-installed)"
+          echo "  taps:    $(brew tap 2>/dev/null | grep -c ocprobetest || echo 0) ocprobetest taps"
