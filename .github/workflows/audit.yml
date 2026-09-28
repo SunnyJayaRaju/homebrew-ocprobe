@@ -1,0 +1,33 @@
+name: audit
+
+# A tap's only content is one formula, so the things that can be wrong are few
+# and cheap to check. This mirrors what `brew test-bot` covers for a core
+# formula, minus the parts that need a real install -- the formula's own `test do`
+# block covers that, and it runs on the end user's machine via `brew test`.
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  style:
+    name: brew style
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Run brew style
+        run: brew style Formula/ocprobe.rb
+
+  audit:
+    name: brew audit --strict --online
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Run brew audit
+        # By name, not by path: this Homebrew refuses `brew audit <path>`.
+        # The tap is checked out as the repository itself, so the fully
+        # qualified name is the repository's own name + the formula.
+        run: brew audit --strict --online "$(basename "$GITHUB_REPOSITORY")/ocprobe"
