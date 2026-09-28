@@ -38,26 +38,47 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # macOS only. GitHub's ubuntu runners ship no Homebrew, and Linuxbrew on
-        # a stock runner means installing it first plus a Linuxbrew-native
-        # prefix; the formula's install stanza is macOS-shaped (it uses
-        # `virtualenv_install_with_resources` and writes a wrapper into bin/),
-        # so a Linux result would not be evidence about the thing users install.
+        # macOS only. GitHub's ubuntu runners ship no Homebrew, and the
+        # install stanza is macOS-shaped (virtualenv_install_with_resources, a
+        # wrapper written into bin/), so a Linux result would not be evidence
+        # about what users actually install.
         os: [macos-latest]
     steps:
+      # NOT `ref:` on the checkout. actions/checkout resolves a missing ref
+      # against the TAGS too, so an unknown branch name became
+      # `release/v3.1.3-prep*` and the fetch failed with
+      #     The process '/opt/homebrew/bin/git' failed with exit code 1
+      # The first run of this workflow died there, before reaching any of the
+      # brew steps. The ref is resolved by hand instead, so an unknown value
+      # fails with a message that says which value was wrong.
       - uses: actions/checkout@v7
-        with:
-          ref: ${{ github.event.inputs.source_ref || 'release/v3.1.3-prep' }}
 
-      - name: Report what is being built
+      - name: Resolve the source ref
+        id: src
         run: |
-          echo "source ref: ${{ github.event.inputs.source_ref || 'release/v3.1.3-prep' }}"
-          echo "VERSION:    $(cat VERSION)"
-          echo "brew:       $(brew --version | head -1)"
+          set -euo pipefail
+          REF="${{ github.event.inputs.source_ref || 'release/v3.1.3-prep' }}"
+          echo "requested: $REF"
+          # Branch first, then tag, so a branch always wins over a same-named tag.
+          if git fetch --quiet --depth 1 origin "$REF" 2>/dev/null; then
+            git checkout --quiet FETCH_HEAD
+            echo "resolved as a branch"
+          elif git fetch --quiet --depth 1 origin "refs/tags/$REF:refs/tags/$REF" 2>/dev/null; then
+            git checkout --quiet "refs/tags/$REF"
+            echo "resolved as a tag"
+          else
+            echo "::error::could not resolve '$REF' as a branch or a tag in SunnyJayaRaju/oc-model-manager"
+            echo "::error::known branches:"
+            git ls-remote --heads origin | awk '{print "  " $2}' | head -20
+            exit 1
+          fi
+          echo "HEAD: $(git rev-parse HEAD)"
+          echo "resolved=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "VERSION=$(tr -d '[:space:]' <VERSION)"
 
-      # The same packaging path as the build job, via the script CI uses, so
-      # what is tested is what would be published.
       - name: Build the release tarball
+        # The same packaging path the build job uses, so what is tested is what
+        # would be published.
         run: bash scripts/ci/package-check.sh build
 
       - name: Show the artifact
@@ -66,6 +87,8 @@ jobs:
           cat .pkgcheck/dist/*.sha256
 
       - name: Make a temp tap with a file:// url
+        env:
+          TAP_REF: ${{ github.event.inputs.tap_ref || 'fix/formula-hardening' }}
         run: |
           set -euo pipefail
           VERSION="$(tr -d '[:space:]' <VERSION)"
@@ -75,13 +98,15 @@ jobs:
           mkdir -p "$TAPDIR/Formula"
 
           # The formula comes from the tap repo, not from here.
-          git clone --quiet --depth 1 \
-            --branch "${{ github.event.inputs.tap_ref || 'fix/formula-hardening' }}" \
-            https://github.com/SunnyJayaRaju/homebrew-ocprobe.git "$RUNNER_TEMP/tapsrc"
+          if ! git clone --quiet --depth 1 --branch "$TAP_REF" \
+               https://github.com/SunnyJayaRaju/homebrew-ocprobe.git "$RUNNER_TEMP/tapsrc"; then
+            echo "::error::could not clone tap ref '$TAP_REF'"
+            exit 1
+          fi
           cp "$RUNNER_TEMP/tapsrc/Formula/ocprobe.rb" "$TAPDIR/Formula/ocprobe.rb"
 
           # Rewrite ONLY url and sha256, and only in this copy. The committed
-          # formula's version/url/sha256 are owned by the release CI.
+          # formula's url and sha256 are owned by the release CI.
           python3 - "$TAPDIR/Formula/ocprobe.rb" "$TARBALL" "$SHA" <<'PY'
           import re
           import sys
@@ -95,7 +120,7 @@ jobs:
           PY
 
           echo "temp formula:"; grep -E '^  (url|sha256) ' "$TAPDIR/Formula/ocprobe.rb" | sed 's/^/  /'
-          echo "the committed formula is unchanged:"; git diff --stat | sed 's/^/  /' || true
+          echo "this repo is unchanged:"; git status --porcelain | grep -v '^?? .pkgcheck' | sed 's/^/  /' || echo "  (clean)"
 
       - name: Install from the temp tap
         run: |
@@ -105,12 +130,12 @@ jobs:
           brew install --build-from-source homebrew/ocprobetest/ocprobe 2>&1 | tee install.log
           # The real exception matters: on a developer machine the sandbox
           # replaced it with a profile dump, which is why this job exists.
-          if ! grep -q "Pouring " install.log && ! brew list --versions ocprobe | grep -q ocprobe; then
-            echo "::error::install did not report a completed pour"
-            tail -40 install.log
+          brew list --versions ocprobe | grep -q ocprobe || {
+            echo "::error::install reported no installed ocprobe"
+            tail -60 install.log
             exit 1
-          fi
-          brew list --versions ocprobe | sed 's/^/  /'
+          }
+          echo "installed: $(brew list --versions ocprobe)"
 
       - name: brew audit --strict on the temp formula
         run: brew audit --strict homebrew/ocprobetest/ocprobe
@@ -119,17 +144,18 @@ jobs:
         run: |
           set -euo pipefail
           brew test homebrew/ocprobetest/ocprobe 2>&1 | tee test.log
-          tail -30 test.log
+          tail -40 test.log
 
       - name: Exercise the installed binary directly
-        # brew test already does this, but the raw output is worth having: it is
-        # the evidence that the wrapper's PATH put a python3 with yaml and
+        # brew test already does this; the raw output is worth having, because it
+        # is the evidence that the wrapper's PATH put a python3 with yaml and
         # jsonschema ahead of the keg-only one.
         run: |
           set -euo pipefail
           BIN="$(brew --prefix)/bin/ocprobe"
           TMPHOME="$(mktemp -d)"
-          echo "  which ocprobe: $(command -v ocprobe || echo "$BIN")"
+          echo "ocprobe: $BIN"
+          echo "python3: $(python3 --version 2>&1)"
 
           export HOME="$TMPHOME"
           "$BIN" version | sed 's/^/  /'
@@ -164,8 +190,8 @@ jobs:
           SELECT * FROM message;
           SQL
           # Not `sed -i`: that takes a suffix argument on BSD and must not have
-          # one on GNU, and getting it wrong here would silently leave the dump
-          # unrewritten. python has one form on both.
+          # one on GNU, and getting it wrong leaves the dump unrewritten and the
+          # restore quietly meaningless.
           python3 -c "
           import sys
           p = sys.argv[1]
@@ -174,13 +200,16 @@ jobs:
               l.replace('INSERT INTO ', 'INSERT OR REPLACE INTO ', 1) if l.startswith('INSERT INTO ') else l
               for l in lines))
           " "$TMPHOME/good.sql"
-          grep -q 'INSERT OR REPLACE INTO session' "$TMPHOME/good.sql" \
-            || { echo "::error::the dump was not rewritten to INSERT OR REPLACE"; cat "$TMPHOME/good.sql"; exit 1; }
+          grep -q 'INSERT OR REPLACE INTO session' "$TMPHOME/good.sql" || {
+            echo "::error::the dump was not rewritten to INSERT OR REPLACE"
+            cat "$TMPHOME/good.sql"
+            exit 1
+          }
 
           "$BIN" session restore "$TMPHOME/good.sql" | sed 's/^/  /'
           got="$(sqlite3 "$DB" "SELECT data FROM message WHERE id='m1';")"
           [ "$got" = "has ; semicolon" ] || { echo "::error::restore wrote '$got'"; exit 1; }
-          echo "  valid restore: ok (value round-tripped)"
+          echo "valid restore: ok (value round-tripped)"
 
           cp "$DB" "$TMPHOME/before.db"
           cat >"$TMPHOME/evil.sql" <<'SQL'
@@ -191,12 +220,23 @@ jobs:
           "$BIN" session restore "$TMPHOME/evil.sql" >/dev/null 2>&1 || rc=$?
           [ "$rc" -ne 0 ] || { echo "::error::the bypass dump was accepted"; exit 1; }
           cmp -s "$TMPHOME/before.db" "$DB" || { echo "::error::the rejected restore modified the database"; exit 1; }
-          echo "  bypass dump: rejected (rc=$rc), database byte-identical"
+          echo "bypass dump: rejected (rc=$rc), database byte-identical"
+
+      - name: Upload the install and test logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: brew-install-logs
+          path: |
+            install.log
+            test.log
+          retention-days: 7
+          if-no-files-found: warn
 
       - name: Uninstall and untap
         if: always()
         run: |
           brew uninstall --force ocprobe 2>&1 | tail -3 || true
           brew untap homebrew/ocprobetest 2>&1 | tail -2 || true
-          echo "  ocprobe: $(brew list --versions ocprobe 2>/dev/null || echo not-installed)"
-          echo "  taps:    $(brew tap 2>/dev/null | grep -c ocprobetest || echo 0) ocprobetest taps"
+          echo "ocprobe: $(brew list --versions ocprobe 2>/dev/null || echo not-installed)"
+          echo "taps:    $(brew tap 2>/dev/null | grep -c ocprobetest || echo 0) ocprobetest taps"
