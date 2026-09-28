@@ -9,8 +9,12 @@ name: formula-install
 # real answer -- and the question matters, because a formula that cannot install
 # is worse than a formula that fails an audit.
 #
+# NOTE: this workflow lives in the TAP repo, so `actions/checkout` gives us the
+# tap, not oc-model-manager. The source repo is therefore fetched explicitly
+# into a separate directory and the whole job runs from there.
+#
 # Every step works on a COPY:
-#   - oc-model-manager is checked out at an input ref, never modified
+#   - oc-model-manager is read at an input ref, never modified
 #   - the tarball is built through the same packaging path the build job uses
 #   - the formula is copied into a temp tap with url=file:// and the matching
 #     sha256, so the committed formula's version/url/sha256 are never touched
@@ -38,68 +42,76 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # macOS only. GitHub's ubuntu runners ship no Homebrew, and the
-        # install stanza is macOS-shaped (virtualenv_install_with_resources, a
-        # wrapper written into bin/), so a Linux result would not be evidence
-        # about what users actually install.
+        # macOS only. GitHub's ubuntu runners ship no Homebrew, and the install
+        # stanza is macOS-shaped (virtualenv_install_with_resources, a wrapper
+        # written into bin/), so a Linux result would not be evidence about what
+        # users actually install.
         os: [macos-latest]
+    env:
+      SOURCE_REPO: "https://github.com/SunnyJayaRaju/oc-model-manager.git"
+      TAP_REPO: "https://github.com/SunnyJayaRaju/homebrew-ocprobe.git"
     steps:
-      # NOT `ref:` on the checkout. actions/checkout resolves a missing ref
-      # against the TAGS too, so an unknown branch name became
-      # `release/v3.1.3-prep*` and the fetch failed with
-      #     The process '/opt/homebrew/bin/git' failed with exit code 1
-      # The first run of this workflow died there, before reaching any of the
-      # brew steps. The ref is resolved by hand instead, so an unknown value
-      # fails with a message that says which value was wrong.
+      # This repo (the tap) -- used for its Formula/ocprobe.rb.
       - uses: actions/checkout@v7
 
-      - name: Resolve the source ref
+      - name: Fetch oc-model-manager at the requested ref
         id: src
+        env:
+          REF: ${{ github.event.inputs.source_ref || 'release/v3.1.3-prep' }}
         run: |
           set -euo pipefail
-          REF="${{ github.event.inputs.source_ref || 'release/v3.1.3-prep' }}"
-          echo "requested: $REF"
-          # Branch first, then tag, so a branch always wins over a same-named tag.
-          if git fetch --quiet --depth 1 origin "$REF" 2>/dev/null; then
-            git checkout --quiet FETCH_HEAD
-            echo "resolved as a branch"
-          elif git fetch --quiet --depth 1 origin "refs/tags/$REF:refs/tags/$REF" 2>/dev/null; then
-            git checkout --quiet "refs/tags/$REF"
-            echo "resolved as a tag"
+          SRC="$RUNNER_TEMP/oc-model-manager"
+          echo "requested ref: $REF"
+          # Branch first, then tag. actions/checkout's own `ref:` cannot be used
+          # here anyway: this workflow runs in the TAP repo, so the checkout is
+          # the tap, and it resolves a missing ref against tags as well -- the
+          # first run of this job fetched `release/v3.1.3-prep*` and failed with
+          #     The process '/opt/homebrew/bin/git' failed with exit code 1
+          if git clone --quiet --depth 1 --no-tags "$SOURCE_REPO" "$SRC" 2>/dev/null; then
+            if git -C "$SRC" fetch --quiet --depth 1 origin "refs/heads/$REF:refs/remotes/origin/$REF" 2>/dev/null; then
+              git -C "$SRC" checkout --quiet "refs/remotes/origin/$REF"
+              echo "resolved '$REF' as a branch"
+            elif git -C "$SRC" fetch --quiet --depth 1 origin "refs/tags/$REF:refs/tags/$REF" 2>/dev/null; then
+              git -C "$SRC" checkout --quiet "refs/tags/$REF"
+              echo "resolved '$REF' as a tag"
+            else
+              echo "::error::could not resolve '$REF' in $SOURCE_REPO"
+              echo "::error::branches that exist:"
+              git ls-remote --heads "$SOURCE_REPO" | awk '{print "  " $2}' | head -20
+              exit 1
+            fi
           else
-            echo "::error::could not resolve '$REF' as a branch or a tag in SunnyJayaRaju/oc-model-manager"
-            echo "::error::known branches:"
-            git ls-remote --heads origin | awk '{print "  " $2}' | head -20
+            echo "::error::could not clone $SOURCE_REPO"
             exit 1
           fi
-          echo "HEAD: $(git rev-parse HEAD)"
-          echo "resolved=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-          echo "VERSION=$(tr -d '[:space:]' <VERSION)"
+          echo "  HEAD: $(git -C "$SRC" rev-parse HEAD)"
+          echo "  VERSION: $(tr -d '[:space:]' <"$SRC/VERSION")"
+          echo "version=$(tr -d '[:space:]' <"$SRC/VERSION")" >> "$GITHUB_OUTPUT"
 
       - name: Build the release tarball
         # The same packaging path the build job uses, so what is tested is what
         # would be published.
-        run: bash scripts/ci/package-check.sh build
+        run: bash "$RUNNER_TEMP/oc-model-manager/scripts/ci/package-check.sh" build
 
       - name: Show the artifact
         run: |
-          ls -la .pkgcheck/dist/
-          cat .pkgcheck/dist/*.sha256
+          ls -la "$RUNNER_TEMP/oc-model-manager/.pkgcheck/dist/"
+          cat "$RUNNER_TEMP"/oc-model-manager/.pkgcheck/dist/*.sha256
 
       - name: Make a temp tap with a file:// url
         env:
           TAP_REF: ${{ github.event.inputs.tap_ref || 'fix/formula-hardening' }}
         run: |
           set -euo pipefail
-          VERSION="$(tr -d '[:space:]' <VERSION)"
-          TARBALL="$PWD/.pkgcheck/dist/ocprobe-$VERSION.tar.gz"
+          SRC="$RUNNER_TEMP/oc-model-manager"
+          VERSION="$(tr -d '[:space:]' <"$SRC/VERSION")"
+          TARBALL="$SRC/.pkgcheck/dist/ocprobe-$VERSION.tar.gz"
           SHA="$(shasum -a 256 "$TARBALL" | cut -d' ' -f1)"
           TAPDIR="$RUNNER_TEMP/ocprobetesttap"
           mkdir -p "$TAPDIR/Formula"
 
-          # The formula comes from the tap repo, not from here.
-          if ! git clone --quiet --depth 1 --branch "$TAP_REF" \
-               https://github.com/SunnyJayaRaju/homebrew-ocprobe.git "$RUNNER_TEMP/tapsrc"; then
+          # The formula comes from the tap repo, at the requested ref.
+          if ! git clone --quiet --depth 1 --branch "$TAP_REF" "$TAP_REPO" "$RUNNER_TEMP/tapsrc"; then
             echo "::error::could not clone tap ref '$TAP_REF'"
             exit 1
           fi
@@ -119,8 +131,10 @@ jobs:
           open(path, "w").write(s2)
           PY
 
-          echo "temp formula:"; grep -E '^  (url|sha256) ' "$TAPDIR/Formula/ocprobe.rb" | sed 's/^/  /'
-          echo "this repo is unchanged:"; git status --porcelain | grep -v '^?? .pkgcheck' | sed 's/^/  /' || echo "  (clean)"
+          echo "  temp formula:"
+          grep -E '^  (url|sha256) ' "$TAPDIR/Formula/ocprobe.rb" | sed 's/^/  /'
+          echo "  the committed formula is untouched:"
+          git diff --stat | sed 's/^/  /' || echo "    (clean)"
 
       - name: Install from the temp tap
         run: |
@@ -154,8 +168,8 @@ jobs:
           set -euo pipefail
           BIN="$(brew --prefix)/bin/ocprobe"
           TMPHOME="$(mktemp -d)"
-          echo "ocprobe: $BIN"
-          echo "python3: $(python3 --version 2>&1)"
+          echo "  ocprobe: $BIN"
+          echo "  python3: $(python3 --version 2>&1)"
 
           export HOME="$TMPHOME"
           "$BIN" version | sed 's/^/  /'
@@ -209,7 +223,7 @@ jobs:
           "$BIN" session restore "$TMPHOME/good.sql" | sed 's/^/  /'
           got="$(sqlite3 "$DB" "SELECT data FROM message WHERE id='m1';")"
           [ "$got" = "has ; semicolon" ] || { echo "::error::restore wrote '$got'"; exit 1; }
-          echo "valid restore: ok (value round-tripped)"
+          echo "  valid restore: ok (value round-tripped)"
 
           cp "$DB" "$TMPHOME/before.db"
           cat >"$TMPHOME/evil.sql" <<'SQL'
@@ -220,7 +234,7 @@ jobs:
           "$BIN" session restore "$TMPHOME/evil.sql" >/dev/null 2>&1 || rc=$?
           [ "$rc" -ne 0 ] || { echo "::error::the bypass dump was accepted"; exit 1; }
           cmp -s "$TMPHOME/before.db" "$DB" || { echo "::error::the rejected restore modified the database"; exit 1; }
-          echo "bypass dump: rejected (rc=$rc), database byte-identical"
+          echo "  bypass dump: rejected (rc=$rc), database byte-identical"
 
       - name: Upload the install and test logs
         if: always()
