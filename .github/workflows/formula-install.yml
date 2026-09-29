@@ -184,6 +184,29 @@ jobs:
           echo "  temp formula:"
           grep -E '^  (url|sha256) ' "$TAPDIR/Formula/ocprobe.rb" | sed 's/^/  /'
 
+          # Part 3: prove the tarball this job builds carries no AppleDouble
+          # members. oc-model-manager now sets COPYFILE_DISABLE=1 (main 6ac3e78),
+          # so a regression there would show up here as a macOS-built artifact
+          # with one ._* member per real file.
+          #
+          # Read with python's tarfile, not `tar -tzf`: on macOS bsdtar
+          # interprets and hides AppleDouble members when listing, reporting 35
+          # members for a 70-member archive. A `tar -tzf | grep ._` check passes
+          # forever, which is the trap this job exists to avoid.
+          python3 - "$TARBALL" <<'PY'
+          import sys
+          import tarfile
+
+          with tarfile.open(sys.argv[1]) as t:
+              names = t.getnames()
+          bad = [n for n in names
+                 if n.split("/")[-1].startswith("._") or "__MACOSX" in n.split("/")]
+          print("  tarball: %d members, %d AppleDouble" % (len(names), len(bad)))
+          for n in bad[:20]:
+              print("  APPLEDOUBLE", n)
+          sys.exit(1 if bad else 0)
+          PY
+
           # One commit, with the formula already in place. The identity is
           # irrelevant and local to this throwaway repo. The -C and -c ordering
           # matters: `git -C <dir> -c k=v` applies the config to the repository
@@ -255,6 +278,16 @@ jobs:
           EOF
 
           "$BIN" doctor 2>&1 | head -20 | sed 's/^/  /' || true
+
+          # Part 3: the installed tree must be free of AppleDouble files too.
+          # `Dir["lib/*"]` in the formula copies whatever is in the tarball, so a
+          # polluted artifact would land here as literal ._* files in the keg.
+          if find "$(brew --prefix)/Cellar/ocprobe" -name '._*' -print -quit | grep -q .; then
+            echo "::error::the installed tree contains AppleDouble ._* files:"
+            find "$(brew --prefix)/Cellar/ocprobe" -name '._*' | sed 's/^/  /'
+            exit 1
+          fi
+          echo "  installed tree: no ._* files"
 
           sqlite3 "$DB" <<'SQL'
           CREATE TABLE session(id TEXT PRIMARY KEY, title TEXT, data TEXT);

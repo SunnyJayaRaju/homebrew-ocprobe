@@ -26,10 +26,24 @@ class Ocprobe < Formula
     # A venv built from the declared python@3.12, because the code needs an
     # interpreter that actually has PyYAML and jsonschema. See install_wrapper.
     #
-    # FIRST, and not by accident: virtualenv_install_with_resources builds the
-    # venv *at* libexec and clears it on the way. Anything installed under
-    # libexec before this line is silently deleted -- which is exactly what
-    # happened the first time this was written.
+    # Why virtualenv_create and not virtualenv_install_with_resources: the
+    # latter ends with `venv.pip_install_and_link(buildpath)`, i.e. it pip
+    # installs the formula's own source tree. This project is a bash tool with
+    # one Python helper, not a Python distribution, so that step failed on every
+    # single build.
+    #
+    # Why not venv.pip_install: it goes through std_pip_args, which carries
+    # --no-deps --no-binary=:all:. --no-deps leaves jsonschema without attrs, so
+    # `import jsonschema` raises on every config load; --no-binary forces
+    # rpds-py to build from sdist, which needs a Rust toolchain. Wheels plus
+    # normal dependency resolution is what works. --uploaded-prior-to is kept:
+    # it is Homebrew's guard against a freshly compromised PyPI release, and
+    # giving that up is not worth the convenience.
+    #
+    # And not venv.pip_install's own path to the venv's pip: the venv is created
+    # --without-pip and Homebrew raises on without_pip: false for 3.12+. So pip
+    # comes from the python@3.12 dependency, told which interpreter to install
+    # into with --python=.
     virtualenv_create(libexec, "python3.12")
 
     python = formula_opt_bin("python@3.12")/"python3.12"
@@ -44,7 +58,15 @@ class Ocprobe < Formula
     # restore command dies with "no such file". Do not narrow this.
     (libexec / "lib/ocprobe").install Dir["lib/*"]
     (libexec / "share/ocprobe").install Dir["config/*"]
+    # share/ocprobe is rooted at libexec, not the prefix, because the binary
+    # resolves its own layout from the path it runs at: bin/ocprobe looks for
+    # ../lib/ocprobe/*.sh and ../share/ocprobe/VERSION. libexec/bin/ocprobe
+    # therefore needs libexec/share/ocprobe/VERSION. At the prefix it looks
+    # right and is wrong, and every command dies reading a missing VERSION.
     (libexec / "share/ocprobe/VERSION").write version.to_s
+    # The tarball ships docs/ocprobe.1.md; there is no docs/ocprobe.1. Homebrew
+    # checks the formula's own file list against the archive, so naming a file
+    # that is not there fails the build -- which is how this was found.
     man1.install "docs/ocprobe.1.md" => "ocprobe.1"
 
     (bin/"ocprobe").write <<~EOS
