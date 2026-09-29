@@ -50,17 +50,28 @@ jobs:
     env:
       SOURCE_REPO: "https://github.com/SunnyJayaRaju/oc-model-manager.git"
       TAP_REPO: "https://github.com/SunnyJayaRaju/homebrew-ocprobe.git"
-      # Current Homebrew refuses to LOAD a formula from a tap that has not been
-      # trusted, and the build runs in a forked child whose exception is
-      # serialised over a pipe -- so an untrusted tap surfaces only as
-      #   Failure while executing; /usr/bin/sandbox-exec ... exited with 1
-      # with none of the real message. XDG_CONFIG_HOME is pointed at a scratch
-      # dir so trust.json lands on the throwaway runner and nowhere else, and it
-      # is set at job level because each step is a fresh shell.
-      XDG_CONFIG_HOME: ${{ runner.temp }}/homebrew-config
     steps:
       # This repo (the tap) -- used for its Formula/ocprobe.rb.
       - uses: actions/checkout@v7
+
+      - name: Point Homebrew's trust file at a scratch dir
+        # Current Homebrew refuses to LOAD a formula from a tap that has not
+        # been trusted, and the build runs in a forked child that serialises its
+        # exception over a pipe -- so an untrusted tap surfaces only as
+        #   Failure while executing; /usr/bin/sandbox-exec ... exited with 1
+        # with none of the real message. This step has to run the trust, so
+        # trust.json has to land on the throwaway runner and nowhere else.
+        #
+        # Written to GITHUB_ENV rather than declared as job-level `env:`:
+        # the `runner` context is not available in `jobs.<job_id>.env`, and
+        # using it there invalidates the whole workflow file -- GitHub then
+        # fails the run with no jobs and no log at all, and never creates a
+        # pull_request run. RUNNER_TEMP is already in the environment, so no
+        # expression is needed here either.
+        run: |
+          set -euo pipefail
+          echo "XDG_CONFIG_HOME=$RUNNER_TEMP/homebrew-config" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/homebrew-config"
 
       - name: Fetch oc-model-manager at the requested ref
         id: src
