@@ -1,0 +1,356 @@
+name: formula-install
+
+# The verification that could not be done by hand: `brew install
+# --build-from-source` on a real runner, against a real built tarball.
+#
+# On a developer machine Homebrew wraps builds in sandbox-exec, and the sandbox
+# denied the install with the real exception hidden behind a 30-line profile
+# dump. A CI runner has no such wrapper, so this is where that question gets a
+# real answer -- and the question matters, because a formula that cannot install
+# is worse than a formula that fails an audit.
+#
+# NOTE: this workflow lives in the TAP repo, so `actions/checkout` gives us the
+# tap, not oc-model-manager. The source repo is therefore fetched explicitly
+# into a separate directory and the whole job runs from there.
+#
+# Every step works on a COPY:
+#   - oc-model-manager is read at an input ref, never modified
+#   - the tarball is built through the same packaging path the build job uses
+#   - the formula is copied into a temp tap with url=file:// and the matching
+#     sha256, so the committed formula's version/url/sha256 are never touched
+#   - the temp tap is untapped and nothing is left installed
+on:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: "oc-model-manager ref to build the tarball from"
+        required: false
+        default: "release/v3.1.3-prep"
+      tap_ref:
+        description: "homebrew-ocprobe ref holding the formula to test"
+        required: false
+        default: "fix/formula-hardening"
+
+permissions:
+  contents: read
+
+jobs:
+  install:
+    name: brew install + test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # macOS only. GitHub's ubuntu runners ship no Homebrew, and the install
+        # stanza is macOS-shaped (a python@3.12 venv and a bash wrapper written
+        # into bin/), so a Linux result would not be evidence about what
+        # users actually install.
+        os: [macos-latest]
+    env:
+      SOURCE_REPO: "https://github.com/SunnyJayaRaju/oc-model-manager.git"
+      TAP_REPO: "https://github.com/SunnyJayaRaju/homebrew-ocprobe.git"
+    steps:
+      # This repo (the tap) -- used for its Formula/ocprobe.rb.
+      - uses: actions/checkout@v7
+
+      - name: Point Homebrew's trust file at a scratch dir
+        # Current Homebrew refuses to LOAD a formula from a tap that has not
+        # been trusted, and the build runs in a forked child that serialises its
+        # exception over a pipe -- so an untrusted tap surfaces only as
+        #   Failure while executing; /usr/bin/sandbox-exec ... exited with 1
+        # with none of the real message. This step has to run the trust, so
+        # trust.json has to land on the throwaway runner and nowhere else.
+        #
+        # Written to GITHUB_ENV rather than declared as job-level `env:`:
+        # the `runner` context is not available in `jobs.<job_id>.env`, and
+        # using it there invalidates the whole workflow file -- GitHub then
+        # fails the run with no jobs and no log at all, and never creates a
+        # pull_request run. RUNNER_TEMP is already in the environment, so no
+        # expression is needed here either.
+        run: |
+          set -euo pipefail
+          echo "XDG_CONFIG_HOME=$RUNNER_TEMP/homebrew-config" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/homebrew-config"
+
+      - name: Fetch oc-model-manager at the requested ref
+        id: src
+        env:
+          REF: ${{ github.event.inputs.source_ref || 'release/v3.1.3-prep' }}
+        run: |
+          set -euo pipefail
+          SRC="$RUNNER_TEMP/oc-model-manager"
+          echo "requested ref: $REF"
+          # Branch first, then tag. actions/checkout's own `ref:` cannot be used
+          # here anyway: this workflow runs in the TAP repo, so the checkout is
+          # the tap, and it resolves a missing ref against tags as well -- the
+          # first run of this job fetched `release/v3.1.3-prep*` and failed with
+          #     The process '/opt/homebrew/bin/git' failed with exit code 1
+          if git clone --quiet --depth 1 --no-tags "$SOURCE_REPO" "$SRC" 2>/dev/null; then
+            if git -C "$SRC" fetch --quiet --depth 1 origin "refs/heads/$REF:refs/remotes/origin/$REF" 2>/dev/null; then
+              git -C "$SRC" checkout --quiet "refs/remotes/origin/$REF"
+              echo "resolved '$REF' as a branch"
+            elif git -C "$SRC" fetch --quiet --depth 1 origin "refs/tags/$REF:refs/tags/$REF" 2>/dev/null; then
+              git -C "$SRC" checkout --quiet "refs/tags/$REF"
+              echo "resolved '$REF' as a tag"
+            else
+              echo "::error::could not resolve '$REF' in $SOURCE_REPO"
+              echo "::error::branches that exist:"
+              git ls-remote --heads "$SOURCE_REPO" | awk '{print "  " $2}' | head -20
+              exit 1
+            fi
+          else
+            echo "::error::could not clone $SOURCE_REPO"
+            exit 1
+          fi
+          echo "  HEAD: $(git -C "$SRC" rev-parse HEAD)"
+          echo "  VERSION: $(tr -d '[:space:]' <"$SRC/VERSION")"
+          echo "version=$(tr -d '[:space:]' <"$SRC/VERSION")" >> "$GITHUB_OUTPUT"
+
+      - name: Build the release tarball
+        # The same packaging path the build job uses, so what is tested is what
+        # would be published.
+        #
+        # PKGCHECK_WORK is pinned rather than left to default. The script writes
+        # to $PKGCHECK_WORK (defaulting to $RUNNER_TEMP/pkgcheck), and the
+        # previous version of this step guessed at a `.pkgcheck/dist/` path that
+        # the script never creates -- so the run died in "Show the artifact" with
+        #   ls: .../oc-model-manager/.pkgcheck/dist/: No such file or directory
+        # Pinning it also means the later steps read the artifact from exactly
+        # where it was written, instead of re-deriving the location.
+        env:
+          PKGCHECK_WORK: ${{ runner.temp }}/pkgcheck
+        run: bash "$RUNNER_TEMP/oc-model-manager/scripts/ci/package-check.sh" build
+
+      - name: Show the artifact
+        env:
+          PKGCHECK_WORK: ${{ runner.temp }}/pkgcheck
+        run: |
+          set -euo pipefail
+          VERSION="$(tr -d '[:space:]' <"$RUNNER_TEMP/oc-model-manager/VERSION")"
+          ls -la "$PKGCHECK_WORK/dist/"
+          # There is no .sha256 here: scripts/ci/package-check.sh's `build` phase
+          # writes only the tarball (it verifies a downloaded checksum, it does
+          # not produce one). The formula step computes the hash itself, which is
+          # the value that matters -- it is what the real release CI publishes.
+          ls -la "$PKGCHECK_WORK/ocprobe-$VERSION.tar.gz"
+          shasum -a 256 "$PKGCHECK_WORK/ocprobe-$VERSION.tar.gz"
+
+      - name: Make a temp tap with a file:// url
+        env:
+          TAP_REF: ${{ github.event.inputs.tap_ref || 'fix/formula-hardening' }}
+        run: |
+          set -euo pipefail
+          SRC="$RUNNER_TEMP/oc-model-manager"
+          VERSION="$(tr -d '[:space:]' <"$SRC/VERSION")"
+          # The path the build step pinned, not a re-derivation of it.
+          TARBALL="$RUNNER_TEMP/pkgcheck/ocprobe-$VERSION.tar.gz"
+          SHA="$(shasum -a 256 "$TARBALL" | cut -d' ' -f1)"
+          # brew tap wants a git repository, not a directory. The run before
+          # this one failed with
+          #     fatal: repository '.../ocprobetesttap' does not exist
+          # and the one before that had the same shape but got further, so the
+          # whole thing is assembled in a temp dir and committed ONCE, at the end
+          # -- committing before the formula is written commits an empty tree
+          # (git refuses, under set -e) and the step dies on the message.
+          TAPDIR="$RUNNER_TEMP/ocprobetesttap"
+          rm -rf "$TAPDIR" 2>/dev/null || true
+          mkdir -p "$TAPDIR/Formula"
+
+          # The formula comes from the tap repo, at the requested ref.
+          if ! git clone --quiet --depth 1 --branch "$TAP_REF" "$TAP_REPO" "$RUNNER_TEMP/tapsrc"; then
+            echo "::error::could not clone tap ref '$TAP_REF'"
+            exit 1
+          fi
+          cp "$RUNNER_TEMP/tapsrc/Formula/ocprobe.rb" "$TAPDIR/Formula/ocprobe.rb"
+
+          # Rewrite ONLY url and sha256, and only in this copy. The committed
+          # formula's url and sha256 are owned by the release CI.
+          python3 - "$TAPDIR/Formula/ocprobe.rb" "$TARBALL" "$SHA" <<'PY'
+          import re
+          import sys
+
+          path, tarball, sha = sys.argv[1], sys.argv[2], sys.argv[3]
+          s = open(path).read()
+          # Match either quote style: `brew style` rewrites a formula to single
+          # quotes, so anchoring on double quotes made this rewrite a no-op on a
+          # style-cleaned formula.
+          s2 = re.sub(r'^  url (["\']).*\1$', '  url "file://%s"' % tarball, s, count=1, flags=re.M)
+          s2 = re.sub(r'^  sha256 (["\']).*\1$', '  sha256 "%s"' % sha, s2, count=1, flags=re.M)
+          assert s2 != s, "url/sha256 were not rewritten"
+          open(path, "w").write(s2)
+          PY
+
+          echo "  temp formula:"
+          grep -E '^  (url|sha256) ' "$TAPDIR/Formula/ocprobe.rb" | sed 's/^/  /'
+
+          # Part 3: prove the tarball this job builds carries no AppleDouble
+          # members. oc-model-manager now sets COPYFILE_DISABLE=1 (main 6ac3e78),
+          # so a regression there would show up here as a macOS-built artifact
+          # with one ._* member per real file.
+          #
+          # Read with python's tarfile, not `tar -tzf`: on macOS bsdtar
+          # interprets and hides AppleDouble members when listing, reporting 35
+          # members for a 70-member archive. A `tar -tzf | grep ._` check passes
+          # forever, which is the trap this job exists to avoid.
+          python3 - "$TARBALL" <<'PY'
+          import sys
+          import tarfile
+
+          with tarfile.open(sys.argv[1]) as t:
+              names = t.getnames()
+          bad = [n for n in names
+                 if n.split("/")[-1].startswith("._") or "__MACOSX" in n.split("/")]
+          print("  tarball: %d members, %d AppleDouble" % (len(names), len(bad)))
+          for n in bad[:20]:
+              print("  APPLEDOUBLE", n)
+          sys.exit(1 if bad else 0)
+          PY
+
+          # One commit, with the formula already in place. The identity is
+          # irrelevant and local to this throwaway repo. The -C and -c ordering
+          # matters: `git -C <dir> -c k=v` applies the config to the repository
+          # at <dir>, and the commit must not be run from the tap's own
+          # checkout.
+          git -C "$TAPDIR" init --quiet
+          git -C "$TAPDIR" add -A
+          git -C "$TAPDIR" -c user.email=ci@example.invalid -c user.name=ci \
+            commit --quiet -m "temp tap"
+          git -C "$TAPDIR" log --oneline | sed 's/^/  /'
+          git -C "$TAPDIR" ls-files | sed 's/^/  /'
+
+          echo "  the committed formula is untouched:"
+          git diff --stat | sed 's/^/  /' || echo "    (clean)"
+
+      - name: Install from the temp tap
+        run: |
+          set -euo pipefail
+          TAPDIR="$RUNNER_TEMP/ocprobetesttap"
+          mkdir -p "$XDG_CONFIG_HOME"
+          brew tap homebrew/ocprobetest "$TAPDIR"
+          # A path-tapped tap is identified by its path, not by the
+          # sunnyjayaraju/ocprobe name, so trust has to follow the tap.
+          brew trust --tap homebrew/ocprobetest
+          brew install --build-from-source homebrew/ocprobetest/ocprobe 2>&1 | tee install.log
+          # The real exception matters: on a developer machine the sandbox
+          # replaced it with a profile dump, which is why this job exists.
+          brew list --versions ocprobe | grep -q ocprobe || {
+            echo "::error::install reported no installed ocprobe"
+            tail -60 install.log
+            exit 1
+          }
+          echo "installed: $(brew list --versions ocprobe)"
+
+      - name: brew audit --strict on the temp formula
+        run: brew audit --strict homebrew/ocprobetest/ocprobe
+
+      - name: brew test
+        run: |
+          set -euo pipefail
+          brew test homebrew/ocprobetest/ocprobe 2>&1 | tee test.log
+          tail -40 test.log
+
+      - name: Exercise the installed binary directly
+        # brew test already does this; the raw output is worth having, because it
+        # is the evidence that the wrapper's PATH put a python3 with yaml and
+        # jsonschema ahead of the keg-only one.
+        run: |
+          set -euo pipefail
+          BIN="$(brew --prefix)/bin/ocprobe"
+          TMPHOME="$(mktemp -d)"
+          echo "  ocprobe: $BIN"
+          echo "  python3: $(python3 --version 2>&1)"
+
+          export HOME="$TMPHOME"
+          "$BIN" version | sed 's/^/  /'
+
+          DB="$TMPHOME/opencode.db"
+          mkdir -p "$TMPHOME/.config/ocprobe"
+          cat >"$TMPHOME/.config/ocprobe/config.yaml" <<EOF
+          version: 1
+          opencode:
+            config_path: "$TMPHOME/opencode.json"
+            db_path: "$DB"
+          logging:
+            level: info
+            format: text
+            file_enabled: false
+          EOF
+
+          "$BIN" doctor 2>&1 | head -20 | sed 's/^/  /' || true
+
+          # Part 3: the installed tree must be free of AppleDouble files too.
+          # `Dir["lib/*"]` in the formula copies whatever is in the tarball, so a
+          # polluted artifact would land here as literal ._* files in the keg.
+          if find "$(brew --prefix)/Cellar/ocprobe" -name '._*' -print -quit | grep -q .; then
+            echo "::error::the installed tree contains AppleDouble ._* files:"
+            find "$(brew --prefix)/Cellar/ocprobe" -name '._*' | sed 's/^/  /'
+            exit 1
+          fi
+          echo "  installed tree: no ._* files"
+
+          sqlite3 "$DB" <<'SQL'
+          CREATE TABLE session(id TEXT PRIMARY KEY, title TEXT, data TEXT);
+          CREATE TABLE message(id TEXT PRIMARY KEY, session_id TEXT, data TEXT);
+          CREATE TABLE part(id TEXT PRIMARY KEY, message_id TEXT, data TEXT);
+          CREATE TABLE todo(id TEXT PRIMARY KEY, session_id TEXT, content TEXT);
+          INSERT INTO session VALUES('s1','t;1','multi' || char(10) || 'line');
+          INSERT INTO message VALUES('m1','s1','has ; semicolon');
+          SQL
+          sqlite3 -readonly "$DB" <<'SQL' >"$TMPHOME/good.sql"
+          .mode insert session
+          SELECT * FROM session;
+          .mode insert message
+          SELECT * FROM message;
+          SQL
+          # Not `sed -i`: that takes a suffix argument on BSD and must not have
+          # one on GNU, and getting it wrong leaves the dump unrewritten and the
+          # restore quietly meaningless.
+          python3 -c "
+          import sys
+          p = sys.argv[1]
+          lines = open(p).read().splitlines(True)
+          open(p, 'w').write(''.join(
+              l.replace('INSERT INTO ', 'INSERT OR REPLACE INTO ', 1) if l.startswith('INSERT INTO ') else l
+              for l in lines))
+          " "$TMPHOME/good.sql"
+          grep -q 'INSERT OR REPLACE INTO session' "$TMPHOME/good.sql" || {
+            echo "::error::the dump was not rewritten to INSERT OR REPLACE"
+            cat "$TMPHOME/good.sql"
+            exit 1
+          }
+
+          "$BIN" session restore "$TMPHOME/good.sql" | sed 's/^/  /'
+          got="$(sqlite3 "$DB" "SELECT data FROM message WHERE id='m1';")"
+          [ "$got" = "has ; semicolon" ] || { echo "::error::restore wrote '$got'"; exit 1; }
+          echo "  valid restore: ok (value round-tripped)"
+
+          cp "$DB" "$TMPHOME/before.db"
+          cat >"$TMPHOME/evil.sql" <<'SQL'
+          INSERT OR REPLACE INTO session VALUES('s9','should not appear','x');
+          DELETE FROM message;
+          SQL
+          rc=0
+          "$BIN" session restore "$TMPHOME/evil.sql" >/dev/null 2>&1 || rc=$?
+          [ "$rc" -ne 0 ] || { echo "::error::the bypass dump was accepted"; exit 1; }
+          cmp -s "$TMPHOME/before.db" "$DB" || { echo "::error::the rejected restore modified the database"; exit 1; }
+          echo "  bypass dump: rejected (rc=$rc), database byte-identical"
+
+      - name: Upload the install and test logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: brew-install-logs
+          path: |
+            install.log
+            test.log
+          retention-days: 7
+          if-no-files-found: warn
+
+      - name: Uninstall and untap
+        if: always()
+        run: |
+          brew uninstall --force ocprobe 2>&1 | tail -3 || true
+          brew untap homebrew/ocprobetest 2>&1 | tail -2 || true
+          echo "ocprobe: $(brew list --versions ocprobe 2>/dev/null || echo not-installed)"
+          echo "taps:    $(brew tap 2>/dev/null | grep -c ocprobetest || echo 0) ocprobetest taps"

@@ -1,0 +1,44 @@
+name: tests
+
+# A tap has no build of its own: `brew install` fetches a released tarball, and
+# the artifact itself is verified by the source repo's "Package Check" job, which
+# builds the tarball and runs the installed binary. What is left for the tap is
+# the formula, and that is what this checks on both platforms.
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  formula:
+    name: formula checks (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # macos only: Homebrew is not installed on GitHub's ubuntu runners, so
+        # a linux leg fails on `brew: command not found` rather than on anything
+        # about the formula.
+        os: [macos-latest]
+    steps:
+      - uses: actions/checkout@v7
+      - name: brew style
+        run: brew style Formula/ocprobe.rb
+      - name: brew audit --strict
+        run: brew audit --tap="$GITHUB_REPOSITORY" --strict ocprobe
+      # The install stanza and the test block are Ruby, so a syntax error in
+      # either would only surface at install time on a user's machine. This
+      # parses the formula without building it.
+      - name: parse the formula
+        run: |
+          ruby -c Formula/ocprobe.rb
+      - name: the install stanza ships the Python module
+        # The regression this guards: a *.sh-only glob in the lib copy silently
+        # drops lib/session_restore.py, and the resulting install passes every
+        # version check while `ocprobe session restore` dies.
+        run: |
+          grep -q 'Dir\["lib/\*"\]' Formula/ocprobe.rb
+          ! grep -qE 'Dir\["lib/\*\.sh"\]' Formula/ocprobe.rb
