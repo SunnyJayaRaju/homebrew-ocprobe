@@ -76,7 +76,12 @@ jobs:
       - name: Fetch oc-model-manager at the requested ref
         id: src
         env:
-          REF: ${{ github.event.inputs.source_ref || 'release/v3.1.3-prep' }}
+          # The default must be a ref that always exists. It was
+          # `release/v3.1.3-prep`, a long-lived prep branch; once that branch
+          # was fully merged into main and deleted, every default run failed
+          # here with "could not resolve". `main` carries the VERSION the
+          # current formula was built from.
+          REF: ${{ github.event.inputs.source_ref || 'main' }}
         run: |
           set -euo pipefail
           SRC="$RUNNER_TEMP/oc-model-manager"
@@ -138,7 +143,10 @@ jobs:
 
       - name: Make a temp tap with a file:// url
         env:
-          TAP_REF: ${{ github.event.inputs.tap_ref || 'fix/formula-hardening' }}
+          # Same rule as source_ref above: the default must be a ref that
+          # always exists. `fix/formula-hardening` was the branch this
+          # workflow was born on; `main` is the permanent default now.
+          TAP_REF: ${{ github.event.inputs.tap_ref || 'main' }}
         run: |
           set -euo pipefail
           SRC="$RUNNER_TEMP/oc-model-manager"
