@@ -9,6 +9,14 @@ Homebrew tap for [ocprobe](https://github.com/SunnyJayaRaju/oc-model-manager) �
 
 Enterprise-grade model catalog probe for [OpenCode](https://opencode.ai). Handles the full lifecycle: catalog diffing, live probing, alerting, safe application, and continuous monitoring. Full docs & features: [oc-model-manager](https://github.com/SunnyJayaRaju/oc-model-manager).
 
+## What changed in 3.2.x
+
+- **OpenCode 2.x support** — generation is detected at runtime: config discovery (`opencode.jsonc` preferred), session work through the 2.x tables, backup/restore via `opencode session export`/`import`, and guarded session cleanup against the 2.x tables.
+- **Safer applies** — on OpenCode 2.x, `validate --apply` refuses to write per-provider model lists (2.x does not honour them); 1.x behaviour is unchanged.
+- **Session hygiene** — every probe run now cleans up its own probe session, and session queries bind their parameters.
+
+Full list: [CHANGELOG](https://github.com/SunnyJayaRaju/oc-model-manager/blob/main/CHANGELOG.md).
+
 ## Install
 
 ```bash
