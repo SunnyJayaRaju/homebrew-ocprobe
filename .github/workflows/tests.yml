@@ -24,7 +24,18 @@ jobs:
         # about the formula.
         os: [macos-latest]
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Workflow actions are pinned to a commit SHA
+        run: |
+          set -euo pipefail
+          bad="$(grep -rhE '^[[:space:]]*-?[[:space:]]*uses: ' .github/workflows | grep -vE '@[0-9a-f]{40}([[:space:]]|$)' || true)"
+          if [ -n "$bad" ]; then
+            echo "::error::unpinned workflow actions:"
+            printf '%s\n' "$bad"
+            exit 1
+          fi
+
       - name: brew style
         run: brew style Formula/ocprobe.rb
       - name: brew audit --strict

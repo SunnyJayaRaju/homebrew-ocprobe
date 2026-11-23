@@ -17,7 +17,7 @@ jobs:
     name: brew style
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Run brew style
         run: brew style Formula/ocprobe.rb
 
@@ -25,7 +25,7 @@ jobs:
     name: brew audit --strict --online
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Run brew audit
         # By fully-qualified name, not by path: this Homebrew refuses
         # --tap is required: without it brew resolves the name against
