@@ -16,6 +16,7 @@ jobs:
   formula:
     name: formula checks (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:
@@ -37,9 +38,11 @@ jobs:
           fi
 
       - name: brew style
-        run: brew style Formula/ocprobe.rb
+        timeout-minutes: 5
+        run: time brew style Formula/ocprobe.rb
       - name: brew audit --strict
-        run: brew audit --tap="$GITHUB_REPOSITORY" --strict ocprobe
+        timeout-minutes: 5
+        run: time brew audit --tap="$GITHUB_REPOSITORY" --strict ocprobe
       # The install stanza and the test block are Ruby, so a syntax error in
       # either would only surface at install time on a user's machine. This
       # parses the formula without building it.

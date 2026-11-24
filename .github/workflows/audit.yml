@@ -16,18 +16,22 @@ jobs:
   style:
     name: brew style
     runs-on: macos-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Run brew style
-        run: brew style Formula/ocprobe.rb
+        timeout-minutes: 5
+        run: time brew style Formula/ocprobe.rb
 
   audit:
     name: brew audit --strict --online
     runs-on: macos-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Run brew audit
         # By fully-qualified name, not by path: this Homebrew refuses
         # --tap is required: without it brew resolves the name against
         # homebrew/core, where there is no such formula.
-        run: brew audit --tap="$GITHUB_REPOSITORY" --strict --online ocprobe
+        timeout-minutes: 5
+        run: time brew audit --tap="$GITHUB_REPOSITORY" --strict --online ocprobe
